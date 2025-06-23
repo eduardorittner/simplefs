@@ -2,5 +2,5 @@
 *mod*
 modules*
 *cmd
-*.o
+*.o*
 .clang-format
