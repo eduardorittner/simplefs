@@ -2,3 +2,4 @@
 *mod*
 modules*
 *cmd
+*.o
