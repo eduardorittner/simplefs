@@ -30,7 +30,7 @@
  * regular file. The functions are called by the VFS when the user invokes the
  * corresponding operations.
  */
-const struct file_operations ramfs_file_operations = {
+const struct file_operations mfs_file_ops = {
     /*
      * generic_file_read_iter is a kernel-provided helper function that
      * implements file reading. It works by reading data from the page cache. If
@@ -65,7 +65,7 @@ const struct file_operations ramfs_file_operations = {
  * These operations handle metadata changes like setting attributes
  * (permissions, etc.).
  */
-const struct inode_operations ramfs_file_inode_operations = {
+const struct inode_operations mfs_file_inode_ops = {
     /*
      * simple_setattr is a generic helper for updating inode attributes (like
      * size, permissions, timestamps) from user-space calls like chmod(2) or
@@ -101,7 +101,7 @@ struct ramfs_fs_info {
 
 // Forward declarations for operations structures used below.
 static const struct super_operations ramfs_ops;
-static const struct inode_operations ramfs_dir_inode_operations;
+static const struct inode_operations mfs_dir_inode_ops;
 
 /*
  * NOTE: The original ramfs code uses `ram_aops` which is defined in mm/shmem.c.
@@ -170,12 +170,12 @@ struct inode *ramfs_get_inode(struct super_block *sb, const struct inode *dir,
     switch (mode & S_IFMT) {
       // Regular file
     case S_IFREG:
-      inode->i_op = &ramfs_file_inode_operations;
-      inode->i_fop = &ramfs_file_operations;
+      inode->i_op = &mfs_file_inode_ops;
+      inode->i_fop = &mfs_file_ops;
       break;
       // Directory
     case S_IFDIR:
-      inode->i_op = &ramfs_dir_inode_operations;
+      inode->i_op = &mfs_dir_inode_ops;
       inode->i_fop =
           &simple_dir_operations; // Generic kernel operations for directories
       /*
@@ -201,7 +201,7 @@ struct inode *ramfs_get_inode(struct super_block *sb, const struct inode *dir,
 }
 
 /**
- * ramfs_mknod - Creates a filesystem node (file, directory, etc.).
+ * mfs_mknod - Creates a filesystem node (file, directory, etc.).
  * @idmap: The ID mapping for the mount.
  * @dir: Inode of the parent directory.
  * @dentry: The directory entry (dentry) for the new file, which holds the name.
@@ -210,8 +210,8 @@ struct inode *ramfs_get_inode(struct super_block *sb, const struct inode *dir,
  *
  * This is the generic node creation function called by create, mkdir, etc.
  */
-static int ramfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
-                       struct dentry *dentry, umode_t mode, dev_t dev) {
+static int mfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+                     struct dentry *dentry, umode_t mode, dev_t dev) {
   struct inode *inode = ramfs_get_inode(dir->i_sb, dir, mode, dev);
   int error = -ENOSPC; // Assume error "No space on device" by default
 
@@ -238,16 +238,16 @@ static int ramfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
   return error;
 }
 
-// Wrapper around ramfs_mknod for creating a directory.
-static int ramfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-                       struct dentry *dentry, umode_t mode) {
+// Wrapper around mfs_mknod for creating a directory.
+static int mfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+                     struct dentry *dentry, umode_t mode) {
   /*
    * pr_info() prints a message to the kernel log buffer (viewable with dmesg).
    * '%pd' is a format specifier to print a dentry's path.
    */
   pr_info("ramfs: creating directory '%pd'\n", dentry);
 
-  int retval = ramfs_mknod(&nop_mnt_idmap, dir, dentry, mode | S_IFDIR, 0);
+  int retval = mfs_mknod(&nop_mnt_idmap, dir, dentry, mode | S_IFDIR, 0);
   if (!retval)
     /*
      * If mknod was successful, we increment the parent directory's link count
@@ -257,15 +257,15 @@ static int ramfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
   return retval;
 }
 
-// Wrapper around ramfs_mknod for creating a regular file.
-static int ramfs_create(struct mnt_idmap *idmap, struct inode *dir,
-                        struct dentry *dentry, umode_t mode, bool excl) {
+// Wrapper around mfs_mknod for creating a regular file.
+static int mfs_create(struct mnt_idmap *idmap, struct inode *dir,
+                      struct dentry *dentry, umode_t mode, bool excl) {
   pr_info("ramfs: creating file '%pd'\n", dentry);
-  return ramfs_mknod(&nop_mnt_idmap, dir, dentry, mode | S_IFREG, 0);
+  return mfs_mknod(&nop_mnt_idmap, dir, dentry, mode | S_IFREG, 0);
 }
 
 // unlink operation for deleting a file.
-static int ramfs_unlink(struct inode *dir, struct dentry *dentry) {
+static int mfs_unlink(struct inode *dir, struct dentry *dentry) {
   pr_info("ramfs: unlinking file '%pd'\n", dentry);
   /*
    * simple_unlink() is a generic helper that performs the standard steps for
@@ -276,7 +276,7 @@ static int ramfs_unlink(struct inode *dir, struct dentry *dentry) {
 }
 
 // rmdir operation for deleting a directory.
-static int ramfs_rmdir(struct inode *dir, struct dentry *dentry) {
+static int mfs_rmdir(struct inode *dir, struct dentry *dentry) {
   pr_info("ramfs: removing directory '%pd'\n", dentry);
   /*
    * simple_rmdir() is a generic helper that checks if a directory is empty
@@ -290,18 +290,18 @@ static int ramfs_rmdir(struct inode *dir, struct dentry *dentry) {
  * inode. It's how the VFS handles creating, looking up, and deleting files
  * within this directory.
  */
-static const struct inode_operations ramfs_dir_inode_operations = {
-    .create = ramfs_create, // Called for the create(2) syscall.
+static const struct inode_operations mfs_dir_inode_ops = {
+    .create = mfs_create, // Called for the create(2) syscall.
     /*
      * simple_lookup() is a generic helper that looks for a dentry in a
      * directory. Since all dentries are kept in memory, it can just search for
      * it.
      */
     .lookup = simple_lookup,
-    .unlink = ramfs_unlink, // Called for the unlink(2) syscall.
-    .mkdir = ramfs_mkdir,   // Called for the mkdir(2) syscall.
-    .rmdir = ramfs_rmdir,   // Called for the rmdir(2) syscall.
-    .mknod = ramfs_mknod,   // Called for the mknod(2) syscall.
+    .unlink = mfs_unlink, // Called for the unlink(2) syscall.
+    .mkdir = mfs_mkdir,   // Called for the mkdir(2) syscall.
+    .rmdir = mfs_rmdir,   // Called for the rmdir(2) syscall.
+    .mknod = mfs_mknod,   // Called for the mknod(2) syscall.
     /*
      * simple_rename() is a generic helper that handles renaming/moving files.
      * It performs checks and updates directory entries atomically.
