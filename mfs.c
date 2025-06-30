@@ -25,9 +25,12 @@ MODULE_LICENSE("GPL");
 
 /* declarations of functions that are part of operation structures */
 
-static int myfs_mknod(struct inode* dir, struct dentry* dentry, umode_t mode, dev_t dev);
-static int myfs_create(struct inode* dir, struct dentry* dentry, umode_t mode, bool excl);
-static int myfs_mkdir(struct inode* dir, struct dentry* dentry, umode_t mode);
+static int myfs_mknod(
+    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode, dev_t dev);
+static int myfs_create(
+    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode, bool excl);
+static int myfs_mkdir(
+    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode);
 
 /* TODO 2/4: define super_operations structure */
 static const struct super_operations myfs_ops = {
@@ -60,11 +63,15 @@ static const struct inode_operations myfs_file_inode_operations = {
     .getattr = simple_getattr,
 };
 
+extern int simple_write_end(struct file* file, struct address_space* mapping, loff_t pos,
+    unsigned len, unsigned copied, struct page* page, void* fsdata);
+
 static const struct address_space_operations myfs_aops = {
     /* TODO 6/3: Fill address space operations structure. */
-    .readpage = simple_readpage,
+    //.readpage = simple_readpage,
     .write_begin = simple_write_begin,
-    .write_end = simple_write_end,
+    // TODO
+    //.write_end = simple_write_end,
 };
 
 struct inode* myfs_get_inode(struct super_block* sb, const struct inode* dir, int mode)
@@ -81,8 +88,8 @@ struct inode* myfs_get_inode(struct super_block* sb, const struct inode* dir, in
      *     - atime,ctime,mtime
      *     - ino
      */
-    inode_init_owner(inode, dir, mode);
-    inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+    inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
+    inode->__i_atime = inode->__i_mtime = inode->__i_ctime = current_time(inode);
     inode->i_ino = 1;
 
     /* TODO 5/1: Init i_ino using get_next_ino */
@@ -119,7 +126,8 @@ struct inode* myfs_get_inode(struct super_block* sb, const struct inode* dir, in
 }
 
 /* TODO 5/33: Implement myfs_mknod, myfs_create, myfs_mkdir. */
-static int myfs_mknod(struct inode* dir, struct dentry* dentry, umode_t mode, dev_t dev)
+static int myfs_mknod(
+    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode, dev_t dev)
 {
     struct inode* inode = myfs_get_inode(dir->i_sb, dir, mode);
 
@@ -128,21 +136,23 @@ static int myfs_mknod(struct inode* dir, struct dentry* dentry, umode_t mode, de
 
     d_instantiate(dentry, inode);
     dget(dentry);
-    dir->i_mtime = dir->i_ctime = current_time(inode);
+    dir->__i_mtime = dir->__i_ctime = current_time(inode);
 
     return 0;
 }
 
-static int myfs_create(struct inode* dir, struct dentry* dentry, umode_t mode, bool excl)
+static int myfs_create(
+    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode, bool excl)
 {
-    return myfs_mknod(dir, dentry, mode | S_IFREG, 0);
+    return myfs_mknod(idmap, dir, dentry, mode | S_IFREG, 0);
 }
 
-static int myfs_mkdir(struct inode* dir, struct dentry* dentry, umode_t mode)
+static int myfs_mkdir(
+    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode)
 {
     int ret;
 
-    ret = myfs_mknod(dir, dentry, mode | S_IFDIR, 0);
+    ret = myfs_mknod(idmap, dir, dentry, mode | S_IFDIR, 0);
     if (ret != 0)
         return ret;
 
