@@ -12,6 +12,8 @@
 #include <linux/slab.h> // Required for kzalloc/kfree
 #include <linux/uaccess.h> // Required for copy_*_iter
 
+#define MFS_MAGIC 1234123;
+
 /*
  * =============================================================================
  * Data Structures
@@ -368,14 +370,126 @@ static const struct super_operations ramfs_ops = {
     .evict_inode = mfs_evict_inode,
 };
 
+<<<<<<< HEAD
 static int ramfs_fill_super(struct super_block* sb, struct fs_context* fc)
 {
     struct ramfs_fs_info* fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
     struct inode* inode;
     sb->s_fs_info = fsi;
+=======
+// Defines the parameters that can be passed at mount time.
+enum ramfs_param {
+    Opt_mode,
+};
+
+// Describes the "mode" parameter for the mount parser.
+const struct fs_parameter_spec mfs_fs_parameters[]
+    = { // Defines a parameter named "mode" that takes an octal unsigned 32-bit
+          // integer.
+          fsparam_u32oct("mode", Opt_mode), {}
+      };
+
+/**
+ * ramfs_parse_param - Parses a mount option.
+ * @fc: The filesystem context for this mount operation.
+ * @param: The parameter to parse.
+ *
+ * This function is called by the VFS for each mount option provided by the
+ * user.
+ */
+static int ramfs_parse_param(struct fs_context* fc, struct fs_parameter* param)
+{
+    struct fs_parse_result result;
+    struct ramfs_fs_info* fsi = fc->s_fs_info;
+    int opt;
+
+    /*
+     * fs_parse() is a kernel helper that parses a mount parameter according to
+     * the specifications in `mfs_fs_parameters`.
+     */
+    opt = fs_parse(fc, mfs_fs_parameters, param, &result);
+    if (opt < 0)
+        return opt;
+
+    // Handle the parsed option.
+    switch (opt) {
+    case Opt_mode:
+        // Store the provided mode in our filesystem-specific info struct.
+        fsi->mount_opts.mode = result.uint_32 & S_IALLUGO;
+        break;
+    }
+
+    return 0;
+}
+
+/**
+ * ramfs_fill_super - Initializes the superblock for a new mount.
+ * @sb: The superblock object to be filled.
+ * @fc: The filesystem context containing mount options.
+ *
+ * This function sets up the core properties of the filesystem instance.
+ */
+static int ramfs_fill_super(struct super_block* sb, void* data, int idontknow)
+{
+    struct ramfs_fs_info* fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
     if (!fsi)
         return -ENOMEM;
-    fsi->mount_opts.mode = RAMFS_DEFAULT_MODE;
+    sb->s_fs_info = fsi;
+    struct inode* inode;
+
+    // Set filesystem properties.
+    sb->s_maxbytes = MAX_LFS_FILESIZE; // Maximum file size.
+    sb->s_blocksize = PAGE_SIZE; // Use the system's page size as the block size.
+    sb->s_blocksize_bits = PAGE_SHIFT; // Bit shift equivalent of the page size.
+    sb->s_magic = MFS_MAGIC; // Filesystem's unique identifier.
+    sb->s_op = &mfs_ops; // Assign the superblock operations.
+    sb->s_time_gran = 1; // Timestamp granularity in nanoseconds.
+
+    // Create the root inode for the filesystem.
+    inode = mfs_get_inode(sb, NULL, S_IFDIR | fsi->mount_opts.mode, 0);
+    /*
+     * d_make_root() allocates the root dentry ("/") for the filesystem and
+     * associates it with the newly created root inode.
+     */
+    sb->s_root = d_make_root(inode);
+    if (!sb->s_root)
+        return -ENOMEM; // Return "Out of memory" if dentry creation fails.
+
+    return 0;
+}
+
+// Callback to free the filesystem context information when mounting is done or
+// fails.
+static void ramfs_free_fc(struct fs_context* fc)
+{
+    // kfree() is the standard kernel function to free memory allocated with
+    // kzalloc/kmalloc.
+    kfree(fc->s_fs_info);
+}
+
+struct dentry* mfs_mount(
+    struct file_system_type* fs_type, int flags, const char* dev_name, void* data)
+{
+    return mount_nodev(fs_type, flags, data, ramfs_fill_super);
+}
+
+/**
+ * mfs_init_fs_context - Entry point for starting a mount operation.
+ * @fc: The filesystem context allocated by the VFS.
+ *
+ * This function is the first one called when a user tries to mount this
+ * filesystem type.
+ */
+int mfs_init_fs_context(struct fs_context* fc)
+{
+    pr_info("Initializing metric-fs");
+    struct ramfs_fs_info* fsi;
+
+    /*
+     * kzalloc() allocates memory from the kernel's slab allocator and zeroes it.
+     * GFP_KERNEL indicates a normal allocation that can sleep if necessary.
+     */
+    fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
     sb->s_maxbytes = MAX_LFS_FILESIZE;
     sb->s_blocksize = PAGE_SIZE;
     sb->s_blocksize_bits = PAGE_SHIFT;
@@ -397,12 +511,21 @@ void ramfs_kill_sb(struct super_block* sb)
     kill_litter_super(sb);
 }
 
-static struct file_system_type mfs_fs_type = {
-    .name = "mfs",
-    .init_fs_context = fs_context_for_get_tree,
-    .get_tree = ramfs_get_tree,
-    .kill_sb = ramfs_kill_sb,
-    .fs_flags = FS_USERNS_MOUNT,
+/*
+ * This is the main structure that describes the filesystem to the kernel.
+ * It's what gets registered and unregistered.
+ */
+static struct file_system_type ramfs_fs_type = {
+    .name = "mfs", // The name used in "mount -t mfs ..."
+    /*
+     * This function pointer is the entry point for mounting, using the modern
+     * fs_context API.
+     */
+    .init_fs_context = mfs_init_fs_context,
+    .mount = mfs_mount,
+    .parameters = mfs_fs_parameters, // Describes mount parameters.
+    .kill_sb = mfs_kill_sb, // Function to call on unmount.
+    .fs_flags = FS_USERNS_MOUNT, // Flags describing filesystem capabilities.
 };
 
 static int __init init_mfs_fs(void)
