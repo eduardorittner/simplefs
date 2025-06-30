@@ -1,542 +1,228 @@
 /*
+<<<<<<< HEAD
  * mfs.c - A simple in-memory filesystem using direct allocation for both
  * files (kmalloc) and directories (linked list).
+=======
+ * SO2 Lab - Filesystem drivers
+ * Exercise #1 (no-dev filesystem)
+>>>>>>> 80ac265 (startign point from tutorial)
  */
 
 #include <linux/fs.h>
 #include <linux/init.h>
-#include <linux/magic.h>
-#include <linux/mm.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mutex.h> // Required for mutexes
-#include <linux/slab.h> // Required for kzalloc/kfree
-#include <linux/uaccess.h> // Required for copy_*_iter
+#include <linux/pagemap.h>
 
-#define MFS_MAGIC 1234123;
+MODULE_DESCRIPTION("Simple no-dev filesystem");
+MODULE_AUTHOR("SO2");
+MODULE_LICENSE("GPL");
 
-/*
- * =============================================================================
- * Data Structures
- * =============================================================================
- */
+#define MYFS_BLOCKSIZE 4096
+#define MYFS_BLOCKSIZE_BITS 12
+#define MYFS_MAGIC 0xbeefcafe
+#define LOG_LEVEL KERN_ALERT
 
-// Private data for a regular file (stores content)
-struct mfs_file_private {
-    void* data;
-    size_t size;
+/* declarations of functions that are part of operation structures */
+
+static int myfs_mknod(struct inode* dir, struct dentry* dentry, umode_t mode, dev_t dev);
+static int myfs_create(struct inode* dir, struct dentry* dentry, umode_t mode, bool excl);
+static int myfs_mkdir(struct inode* dir, struct dentry* dentry, umode_t mode);
+
+/* TODO 2/4: define super_operations structure */
+static const struct super_operations myfs_ops = {
+    .statfs = simple_statfs,
+    .drop_inode = generic_drop_inode,
 };
 
-// Represents one entry (file or subdir) in a directory's linked list
-struct mfs_dir_entry {
-    char name[NAME_MAX + 1];
-    struct inode* inode;
-    struct mfs_dir_entry* next;
+static const struct inode_operations myfs_dir_inode_operations = {
+    /* TODO 5/8: Fill dir inode operations structure. */
+    .create = myfs_create,
+    .lookup = simple_lookup,
+    .link = simple_link,
+    .unlink = simple_unlink,
+    .mkdir = myfs_mkdir,
+    .rmdir = simple_rmdir,
+    .mknod = myfs_mknod,
+    .rename = simple_rename,
 };
 
-// Private data for a directory (stores linked list and a lock)
-struct mfs_dir_private {
-    struct mutex lock;
-    struct mfs_dir_entry* head;
-};
-
-/*
- * =============================================================================
- * Forward Declarations for our custom operations
- * =============================================================================
- */
-static int mfs_iterate(struct file* filp, struct dir_context* ctx);
-static int mfs_lookup(struct inode* dir, struct dentry* dentry, unsigned int flags);
-static int mfs_create(
-    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode, bool excl);
-static int mfs_mkdir(
-    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode);
-static int mfs_unlink(struct inode* dir, struct dentry* dentry);
-static int mfs_rmdir(struct inode* dir, struct dentry* dentry);
-struct inode* ramfs_get_inode(
-    struct super_block* sb, const struct inode* dir, umode_t mode, dev_t dev);
-
-/*
- * =============================================================================
- * File Operations (for regular files)
- * =============================================================================
- */
-
-static ssize_t mfs_write_iter(struct kiocb* iocb, struct iov_iter* from)
-{
-    struct inode* inode = file_inode(iocb->ki_filp);
-    struct mfs_file_private* p = inode->i_private;
-    void* new_data;
-    size_t new_size = iov_iter_count(from);
-    if (new_size == 0)
-        return 0;
-    new_data = kmalloc(new_size, GFP_KERNEL);
-    if (!new_data)
-        return -ENOMEM;
-    if (copy_from_iter(new_data, new_size, from) != new_size) {
-        kfree(new_data);
-        return -EFAULT;
-    }
-    kfree(p->data);
-    p->data = new_data;
-    p->size = new_size;
-    inode->i_size = new_size;
-    inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
-    return new_size;
-}
-
-static ssize_t mfs_read_iter(struct kiocb* iocb, struct iov_iter* to)
-{
-    struct inode* inode = file_inode(iocb->ki_filp);
-    struct mfs_file_private* p = inode->i_private;
-    loff_t pos = iocb->ki_pos;
-    size_t count = iov_iter_count(to);
-    if (pos >= p->size)
-        return 0;
-    count = min(count, (size_t)(p->size - pos));
-    if (copy_to_iter(p->data + pos, count, to) != count)
-        return -EFAULT;
-    iocb->ki_pos += count;
-    return count;
-}
-
-const struct file_operations mfs_file_operations = {
-    .read_iter = mfs_read_iter,
-    .write_iter = mfs_write_iter,
+static const struct file_operations myfs_file_operations = {
+    /* TODO 6/4: Fill file operations structure. */
+    .read_iter = generic_file_read_iter,
+    .write_iter = generic_file_write_iter,
+    .mmap = generic_file_mmap,
     .llseek = generic_file_llseek,
 };
 
-const struct inode_operations mfs_file_inode_operations = {
-    .setattr = simple_setattr,
+static const struct inode_operations myfs_file_inode_operations = {
+    /* TODO 6/1: Fill file inode operations structure. */
     .getattr = simple_getattr,
 };
 
-/*
- * =============================================================================
- * Directory Operations (our custom implementation)
- * =============================================================================
- */
-
-// The 'readdir' implementation. Called by VFS to list directory contents.
-static int mfs_iterate(struct file* filp, struct dir_context* ctx)
-{
-    struct inode* dir_inode = file_inode(filp);
-    struct mfs_dir_private* p = dir_inode->i_private;
-    struct mfs_dir_entry* entry;
-    int i = 0;
-
-    mutex_lock(&p->lock);
-
-    // The first two entries are always '.' and '..'
-    if (ctx->pos == 0) {
-        if (!dir_emit(ctx, ".", 1, dir_inode->i_ino, DT_DIR))
-            goto out;
-        ctx->pos++;
-    }
-    if (ctx->pos == 1) {
-        if (!dir_emit(ctx, "..", 2, filp->f_path.dentry->d_parent->d_inode->i_ino, DT_DIR))
-            goto out;
-        ctx->pos++;
-    }
-
-    // Find the entry in our list corresponding to the current position.
-    entry = p->head;
-    for (i = 0; i < ctx->pos - 2 && entry; i++, entry = entry->next)
-        ;
-
-    // Iterate through the rest of the list, emitting entries.
-    while (entry) {
-        if (!dir_emit(ctx, entry->name, strlen(entry->name), entry->inode->i_ino,
-                inode_is_dir(entry->inode) ? DT_DIR : DT_REG))
-            goto out;
-
-        ctx->pos++;
-        entry = entry->next;
-    }
-
-out:
-    mutex_unlock(&p->lock);
-    return 0;
-}
-
-// 'lookup' is called by the VFS to find a file in a directory by name.
-static int mfs_lookup(struct inode* dir, struct dentry* dentry, unsigned int flags)
-{
-    struct mfs_dir_private* p = dir->i_private;
-    struct mfs_dir_entry* entry;
-
-    mutex_lock(&p->lock);
-    for (entry = p->head; entry; entry = entry->next) {
-        if (strcmp(entry->name, dentry->d_name.name) == 0) {
-            // Found it. Connect the VFS dentry to our found inode.
-            d_add(dentry, entry->inode);
-            mutex_unlock(&p->lock);
-            return 0;
-        }
-    }
-    mutex_unlock(&p->lock);
-
-    // If we reach here, the entry was not found. We add a "negative" dentry.
-    d_add(dentry, NULL);
-    return 0;
-}
-
-// Helper function to add a new file/dir to our linked list.
-static int mfs_create_entry(struct inode* dir, struct dentry* dentry, umode_t mode)
-{
-    struct mfs_dir_private* p = dir->i_private;
-    struct mfs_dir_entry* new_entry;
-    struct inode* inode;
-
-    // First, create the actual inode for the new file/dir.
-    inode = ramfs_get_inode(dir->i_sb, dir, mode, 0);
-    if (!inode)
-        return -ENOSPC;
-
-    // Allocate our linked list entry structure.
-    new_entry = kzalloc(sizeof(struct mfs_dir_entry), GFP_KERNEL);
-    if (!new_entry)
-        return -ENOMEM;
-
-    // Populate the entry.
-    strcpy(new_entry->name, dentry->d_name.name);
-    new_entry->inode = inode;
-
-    // Lock and add the new entry to the head of the list.
-    mutex_lock(&p->lock);
-    new_entry->next = p->head;
-    p->head = new_entry;
-    mutex_unlock(&p->lock);
-
-    // Tell the VFS to connect the dentry with the new inode.
-    d_instantiate(dentry, inode);
-    inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
-
-    return 0;
-}
-
-static int mfs_create(
-    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode, bool excl)
-{
-    return mfs_create_entry(dir, dentry, mode | S_IFREG);
-}
-
-static int mfs_mkdir(
-    struct mnt_idmap* idmap, struct inode* dir, struct dentry* dentry, umode_t mode)
-{
-    int err = mfs_create_entry(dir, dentry, mode | S_IFDIR);
-    if (!err)
-        inc_nlink(dir); // For the '..' entry in the new dir.
-    return err;
-}
-
-// unlink/rmdir helper to remove an entry from the linked list.
-static int mfs_remove_entry(struct inode* dir, struct dentry* dentry)
-{
-    struct mfs_dir_private* p = dir->i_private;
-    struct mfs_dir_entry *entry, *prev = NULL;
-    int ret = -ENOENT; // "No such file or directory"
-
-    mutex_lock(&p->lock);
-    for (entry = p->head; entry; prev = entry, entry = entry->next) {
-        if (strcmp(entry->name, dentry->d_name.name) == 0) {
-            // For rmdir, check if the directory is empty.
-            if (inode_is_dir(entry->inode)) {
-                struct mfs_dir_private* child_p = entry->inode->i_private;
-                if (child_p->head) {
-                    ret = -ENOTEMPTY;
-                    goto out;
-                }
-            }
-            // Unlink from the list
-            if (prev)
-                prev->next = entry->next;
-            else
-                p->head = entry->next;
-
-            // Decrement link counts and free memory.
-            drop_nlink(entry->inode);
-            if (inode_is_dir(entry->inode))
-                drop_nlink(dir);
-
-            kfree(entry);
-            ret = 0;
-            goto out;
-        }
-    }
-out:
-    mutex_unlock(&p->lock);
-    return ret;
-}
-
-static int mfs_unlink(struct inode* dir, struct dentry* dentry)
-{
-    return mfs_remove_entry(dir, dentry);
-}
-static int mfs_rmdir(struct inode* dir, struct dentry* dentry)
-{
-    return mfs_remove_entry(dir, dentry);
-}
-
-const struct inode_operations mfs_dir_inode_operations = {
-    .lookup = mfs_lookup,
-    .create = mfs_create,
-    .mkdir = mfs_mkdir,
-    .unlink = mfs_unlink,
-    .rmdir = mfs_rmdir,
+static const struct address_space_operations myfs_aops = {
+    /* TODO 6/3: Fill address space operations structure. */
+    .readpage = simple_readpage,
+    .write_begin = simple_write_begin,
+    .write_end = simple_write_end,
 };
 
-const struct file_operations mfs_dir_file_operations = {
-    .iterate_shared = mfs_iterate,
-    .llseek = generic_file_llseek,
-};
-
-/*
- * =============================================================================
- * Filesystem Boilerplate (get_inode, super_operations, etc.)
- * =============================================================================
- */
-
-struct ramfs_mount_opts {
-    umode_t mode;
-};
-struct ramfs_fs_info {
-    struct ramfs_mount_opts mount_opts;
-};
-#define RAMFS_DEFAULT_MODE 0755
-
-struct inode* ramfs_get_inode(
-    struct super_block* sb, const struct inode* dir, umode_t mode, dev_t dev)
+struct inode* myfs_get_inode(struct super_block* sb, const struct inode* dir, int mode)
 {
     struct inode* inode = new_inode(sb);
-    if (inode) {
-        inode->i_ino = get_next_ino();
-        inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
-        simple_inode_init_ts(inode);
-        switch (mode & S_IFMT) {
-        case S_IFREG: {
-            struct mfs_file_private* p = kzalloc(sizeof(*p), GFP_KERNEL);
-            if (!p) {
-                iput(inode);
-                return NULL;
-            }
-            inode->i_private = p;
-            inode->i_op = &mfs_file_inode_operations;
-            inode->i_fop = &mfs_file_operations;
-            break;
-        }
-        case S_IFDIR: {
-            struct mfs_dir_private* p = kzalloc(sizeof(*p), GFP_KERNEL);
-            if (!p) {
-                iput(inode);
-                return NULL;
-            }
-            mutex_init(&p->lock);
-            inode->i_private = p;
-            inode->i_op = &mfs_dir_inode_operations;
-            inode->i_fop = &mfs_dir_file_operations;
-            inc_nlink(inode); // For '.'
-            break;
-        }
-        default:
-            init_special_inode(inode, mode, dev);
-            break;
-        }
+
+    if (!inode)
+        return NULL;
+
+    /* TODO 3/3: fill inode structure
+     *     - mode
+     *     - uid
+     *     - gid
+     *     - atime,ctime,mtime
+     *     - ino
+     */
+    inode_init_owner(inode, dir, mode);
+    inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+    inode->i_ino = 1;
+
+    /* TODO 5/1: Init i_ino using get_next_ino */
+    inode->i_ino = get_next_ino();
+
+    /* TODO 6/1: Initialize address space operations. */
+    inode->i_mapping->a_ops = &myfs_aops;
+
+    if (S_ISDIR(mode)) {
+        /* TODO 3/2: set inode operations for dir inodes. */
+        inode->i_op = &simple_dir_inode_operations;
+        inode->i_fop = &simple_dir_operations;
+
+        /* TODO 5/1: use myfs_dir_inode_operations for inode
+         * operations (i_op).
+         */
+        inode->i_op = &myfs_dir_inode_operations;
+
+        /* TODO 3/1: directory inodes start off with i_nlink == 2 (for "." entry).
+         * Directory link count should be incremented (use inc_nlink).
+         */
+        inc_nlink(inode);
     }
+
+    /* TODO 6/4: Set file inode and file operations for regular files
+     * (use the S_ISREG macro).
+     */
+    if (S_ISREG(mode)) {
+        inode->i_op = &myfs_file_inode_operations;
+        inode->i_fop = &myfs_file_operations;
+    }
+
     return inode;
 }
 
-static void mfs_evict_inode(struct inode* inode)
+/* TODO 5/33: Implement myfs_mknod, myfs_create, myfs_mkdir. */
+static int myfs_mknod(struct inode* dir, struct dentry* dentry, umode_t mode, dev_t dev)
 {
-    clear_inode(inode);
-    if (S_ISREG(inode->i_mode) && inode->i_private) {
-        struct mfs_file_private* p = inode->i_private;
-        kfree(p->data);
-        kfree(p);
-    } else if (S_ISDIR(inode->i_mode) && inode->i_private) {
-        struct mfs_dir_private* p = inode->i_private;
-        struct mfs_dir_entry* entry = p->head;
-        // Free the entire linked list of directory entries.
-        while (entry) {
-            struct mfs_dir_entry* next = entry->next;
-            kfree(entry);
-            entry = next;
-        }
-        kfree(p);
-    }
-}
+    struct inode* inode = myfs_get_inode(dir->i_sb, dir, mode);
 
-static const struct super_operations ramfs_ops = {
-    .statfs = simple_statfs,
-    .evict_inode = mfs_evict_inode,
-};
+    if (inode == NULL)
+        return -ENOSPC;
 
-<<<<<<< HEAD
-static int ramfs_fill_super(struct super_block* sb, struct fs_context* fc)
-{
-    struct ramfs_fs_info* fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
-    struct inode* inode;
-    sb->s_fs_info = fsi;
-=======
-// Defines the parameters that can be passed at mount time.
-enum ramfs_param {
-    Opt_mode,
-};
-
-// Describes the "mode" parameter for the mount parser.
-const struct fs_parameter_spec mfs_fs_parameters[]
-    = { // Defines a parameter named "mode" that takes an octal unsigned 32-bit
-          // integer.
-          fsparam_u32oct("mode", Opt_mode), {}
-      };
-
-/**
- * ramfs_parse_param - Parses a mount option.
- * @fc: The filesystem context for this mount operation.
- * @param: The parameter to parse.
- *
- * This function is called by the VFS for each mount option provided by the
- * user.
- */
-static int ramfs_parse_param(struct fs_context* fc, struct fs_parameter* param)
-{
-    struct fs_parse_result result;
-    struct ramfs_fs_info* fsi = fc->s_fs_info;
-    int opt;
-
-    /*
-     * fs_parse() is a kernel helper that parses a mount parameter according to
-     * the specifications in `mfs_fs_parameters`.
-     */
-    opt = fs_parse(fc, mfs_fs_parameters, param, &result);
-    if (opt < 0)
-        return opt;
-
-    // Handle the parsed option.
-    switch (opt) {
-    case Opt_mode:
-        // Store the provided mode in our filesystem-specific info struct.
-        fsi->mount_opts.mode = result.uint_32 & S_IALLUGO;
-        break;
-    }
+    d_instantiate(dentry, inode);
+    dget(dentry);
+    dir->i_mtime = dir->i_ctime = current_time(inode);
 
     return 0;
 }
 
-/**
- * ramfs_fill_super - Initializes the superblock for a new mount.
- * @sb: The superblock object to be filled.
- * @fc: The filesystem context containing mount options.
- *
- * This function sets up the core properties of the filesystem instance.
- */
-static int ramfs_fill_super(struct super_block* sb, void* data, int idontknow)
+static int myfs_create(struct inode* dir, struct dentry* dentry, umode_t mode, bool excl)
 {
-    struct ramfs_fs_info* fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
-    if (!fsi)
+    return myfs_mknod(dir, dentry, mode | S_IFREG, 0);
+}
+
+static int myfs_mkdir(struct inode* dir, struct dentry* dentry, umode_t mode)
+{
+    int ret;
+
+    ret = myfs_mknod(dir, dentry, mode | S_IFDIR, 0);
+    if (ret != 0)
+        return ret;
+
+    inc_nlink(dir);
+
+    return 0;
+}
+
+static int myfs_fill_super(struct super_block* sb, void* data, int silent)
+{
+    struct inode* root_inode;
+    struct dentry* root_dentry;
+
+    /* TODO 2/5: fill super_block
+     *   - blocksize, blocksize_bits
+     *   - magic
+     *   - super operations
+     *   - maxbytes
+     */
+    sb->s_maxbytes = MAX_LFS_FILESIZE;
+    sb->s_blocksize = MYFS_BLOCKSIZE;
+    sb->s_blocksize_bits = MYFS_BLOCKSIZE_BITS;
+    sb->s_magic = MYFS_MAGIC;
+    sb->s_op = &myfs_ops;
+
+    /* mode = directory & access rights (755) */
+    root_inode
+        = myfs_get_inode(sb, NULL, S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+
+    printk(LOG_LEVEL "root inode has %d link(s)\n", root_inode->i_nlink);
+
+    if (!root_inode)
         return -ENOMEM;
-    sb->s_fs_info = fsi;
-    struct inode* inode;
 
-    // Set filesystem properties.
-    sb->s_maxbytes = MAX_LFS_FILESIZE; // Maximum file size.
-    sb->s_blocksize = PAGE_SIZE; // Use the system's page size as the block size.
-    sb->s_blocksize_bits = PAGE_SHIFT; // Bit shift equivalent of the page size.
-    sb->s_magic = MFS_MAGIC; // Filesystem's unique identifier.
-    sb->s_op = &mfs_ops; // Assign the superblock operations.
-    sb->s_time_gran = 1; // Timestamp granularity in nanoseconds.
-
-    // Create the root inode for the filesystem.
-    inode = mfs_get_inode(sb, NULL, S_IFDIR | fsi->mount_opts.mode, 0);
-    /*
-     * d_make_root() allocates the root dentry ("/") for the filesystem and
-     * associates it with the newly created root inode.
-     */
-    sb->s_root = d_make_root(inode);
-    if (!sb->s_root)
-        return -ENOMEM; // Return "Out of memory" if dentry creation fails.
+    root_dentry = d_make_root(root_inode);
+    if (!root_dentry)
+        goto out_no_root;
+    sb->s_root = root_dentry;
 
     return 0;
+
+out_no_root:
+    iput(root_inode);
+    return -ENOMEM;
 }
 
-// Callback to free the filesystem context information when mounting is done or
-// fails.
-static void ramfs_free_fc(struct fs_context* fc)
-{
-    // kfree() is the standard kernel function to free memory allocated with
-    // kzalloc/kmalloc.
-    kfree(fc->s_fs_info);
-}
-
-struct dentry* mfs_mount(
+static struct dentry* myfs_mount(
     struct file_system_type* fs_type, int flags, const char* dev_name, void* data)
 {
-    return mount_nodev(fs_type, flags, data, ramfs_fill_super);
+    /* TODO 1/1: call superblock mount function */
+    return mount_nodev(fs_type, flags, data, myfs_fill_super);
 }
 
-/**
- * mfs_init_fs_context - Entry point for starting a mount operation.
- * @fc: The filesystem context allocated by the VFS.
- *
- * This function is the first one called when a user tries to mount this
- * filesystem type.
- */
-int mfs_init_fs_context(struct fs_context* fc)
-{
-    pr_info("Initializing metric-fs");
-    struct ramfs_fs_info* fsi;
+/* TODO 1/6: define file_system_type structure */
+static struct file_system_type myfs_fs_type = {
+    .owner = THIS_MODULE,
+    .name = "myfs",
+    .mount = myfs_mount,
+    .kill_sb = kill_litter_super,
+};
 
-    /*
-     * kzalloc() allocates memory from the kernel's slab allocator and zeroes it.
-     * GFP_KERNEL indicates a normal allocation that can sleep if necessary.
-     */
-    fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
-    sb->s_maxbytes = MAX_LFS_FILESIZE;
-    sb->s_blocksize = PAGE_SIZE;
-    sb->s_blocksize_bits = PAGE_SHIFT;
-    sb->s_magic = RAMFS_MAGIC;
-    sb->s_op = &ramfs_ops;
-    sb->s_time_gran = 1;
-    inode = ramfs_get_inode(sb, NULL, S_IFDIR | fsi->mount_opts.mode, 0);
-    sb->s_root = d_make_root(inode);
-    if (!sb->s_root)
-        return -ENOMEM;
+static int __init myfs_init(void)
+{
+    int err;
+
+    /* TODO 1/1: register */
+    err = register_filesystem(&myfs_fs_type);
+    if (err) {
+        printk(LOG_LEVEL "register_filesystem failed\n");
+        return err;
+    }
+
     return 0;
 }
 
-static int ramfs_get_tree(struct fs_context* fc) { return get_tree_nodev(fc, ramfs_fill_super); }
-
-void ramfs_kill_sb(struct super_block* sb)
+static void __exit myfs_exit(void)
 {
-    kfree(sb->s_fs_info);
-    kill_litter_super(sb);
+    /* TODO 1/1: unregister */
+    unregister_filesystem(&myfs_fs_type);
 }
 
-/*
- * This is the main structure that describes the filesystem to the kernel.
- * It's what gets registered and unregistered.
- */
-static struct file_system_type ramfs_fs_type = {
-    .name = "mfs", // The name used in "mount -t mfs ..."
-    /*
-     * This function pointer is the entry point for mounting, using the modern
-     * fs_context API.
-     */
-    .init_fs_context = mfs_init_fs_context,
-    .mount = mfs_mount,
-    .parameters = mfs_fs_parameters, // Describes mount parameters.
-    .kill_sb = mfs_kill_sb, // Function to call on unmount.
-    .fs_flags = FS_USERNS_MOUNT, // Flags describing filesystem capabilities.
-};
-
-static int __init init_mfs_fs(void)
-{
-    pr_info("Initializing MFS (custom directory handling)\n");
-    return register_filesystem(&mfs_fs_type);
-}
-
-static void __exit exit_mfs_fs(void) { unregister_filesystem(&mfs_fs_type); }
-
-module_init(init_mfs_fs);
-module_exit(exit_mfs_fs);
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("AI Assistant");
+module_init(myfs_init);
+module_exit(myfs_exit);
