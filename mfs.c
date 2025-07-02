@@ -32,15 +32,19 @@ MODULE_LICENSE("GPL");
 // Recorded metrics
 // ----------------
 
-static atomic64_t total_bytes_written;
-static atomic64_t total_bytes_read;
-static atomic64_t total_read_ops;
-static atomic64_t total_write_ops;
-static atomic64_t total_files_created;
+static atomic64_t total_bytes_written = ATOMIC_INIT(0);
+static atomic64_t total_bytes_read = ATOMIC_INIT(0);
+static atomic64_t total_read_ops = ATOMIC_INIT(0);
+static atomic64_t total_write_ops = ATOMIC_INIT(0);
+static atomic64_t total_inodes_created = ATOMIC_INIT(0);
+static atomic64_t total_files_created = ATOMIC_INIT(0);
+static atomic64_t total_files_deleted = ATOMIC_INIT(0);
+static atomic64_t total_dirs_created = ATOMIC_INIT(0);
+static atomic64_t total_dirs_deleted = ATOMIC_INIT(0);
 
-// --------------------------------------
-// Forward declarations for regular files
-// --------------------------------------
+// -------------------------------------------------
+// Forward declarations for regular files operations
+// -------------------------------------------------
 
 static int mfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
                      struct dentry *dentry, umode_t mode, dev_t dev);
@@ -48,8 +52,13 @@ static int mfs_create(struct mnt_idmap *idmap, struct inode *dir,
                       struct dentry *dentry, umode_t mode, bool excl);
 static int mfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
                      struct dentry *dentry, umode_t mode);
+static int mfs_rmdir(struct inode *inode, struct dentry *dentry);
+static int mfs_unlink(struct inode *inode, struct dentry *dentry);
 struct inode *mfs_get_inode(struct super_block *sb, const struct inode *dir,
                             int mode);
+
+static ssize_t mfs_write_iter(struct kiocb *kiocb, struct iov_iter *iter);
+static ssize_t mfs_read_iter(struct kiocb *kiocb, struct iov_iter *iter);
 
 // This needs to be declared here since it's not publicly exported by the
 // kernel. In the tutorial this wasn't a problem since the filesystem an in-tree
@@ -80,16 +89,16 @@ static const struct inode_operations mfs_dir_inode_operations = {
     .create = mfs_create,
     .lookup = simple_lookup,
     .link = simple_link,
-    .unlink = simple_unlink,
+    .unlink = mfs_unlink,
     .mkdir = mfs_mkdir,
-    .rmdir = simple_rmdir,
+    .rmdir = mfs_rmdir,
     .mknod = mfs_mknod,
     .rename = simple_rename,
 };
 
 static const struct file_operations mfs_file_operations = {
-    .read_iter = generic_file_read_iter,
-    .write_iter = generic_file_write_iter,
+    .read_iter = mfs_read_iter,
+    .write_iter = mfs_write_iter,
     .mmap = generic_file_mmap,
     .llseek = generic_file_llseek,
 };
@@ -153,11 +162,14 @@ static int mfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
   dget(dentry);
   dir->__i_mtime = dir->__i_ctime = current_time(inode);
 
+  atomic64_inc(&total_inodes_created);
+
   return 0;
 }
 
 static int mfs_create(struct mnt_idmap *idmap, struct inode *dir,
                       struct dentry *dentry, umode_t mode, bool excl) {
+  atomic64_inc(&total_files_created);
   printk(LOG_LEVEL "Creating file: %s\n", dentry->d_iname);
 
   return mfs_mknod(idmap, dir, dentry, mode | S_IFREG, 0);
@@ -172,9 +184,50 @@ static int mfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
   if (ret != 0)
     return ret;
 
+  atomic64_inc(&total_dirs_created);
   inc_nlink(dir);
 
   return 0;
+}
+
+// --------------------------
+// Simple wrappers for metric
+// --------------------------
+
+// Wrapper that increments write_ops and total_bytes_written on success
+static ssize_t mfs_write_iter(struct kiocb *kiocb, struct iov_iter *iter) {
+  ssize_t bytes_written = generic_file_write_iter(kiocb, iter);
+  if (bytes_written > 0) {
+    atomic64_inc(&total_write_ops);
+    atomic64_add(bytes_written, &total_bytes_written);
+  }
+  return bytes_written;
+}
+
+// Wrapper that increments read_ops and total_bytes_read on success
+static ssize_t mfs_read_iter(struct kiocb *kiocb, struct iov_iter *iter) {
+  ssize_t bytes_read = generic_file_read_iter(kiocb, iter);
+  if (bytes_read > 0) {
+    atomic64_inc(&total_read_ops);
+    atomic64_add(bytes_read, &total_bytes_read);
+  }
+  return bytes_read;
+}
+
+// Wrapper that increments total_dirs_deleted on success
+static int mfs_rmdir(struct inode *inode, struct dentry *dentry) {
+  int ret = simple_rmdir(inode, dentry);
+  if (!ret)
+    atomic64_inc(&total_dirs_deleted);
+  return ret;
+}
+
+// Wrapper that increments total_files_deleted on success
+static int mfs_unlink(struct inode *inode, struct dentry *dentry) {
+  int ret = simple_unlink(inode, dentry);
+  if (!ret)
+    atomic64_inc(&total_files_deleted);
+  return ret;
 }
 
 // -------------------------
@@ -186,16 +239,22 @@ static ssize_t mfs_metrics_read(struct file *file, char __user *buf, size_t len,
                                 loff_t *offset) {
   char metrics_buf[1024];
 
+  // TODO: first read all atomics before formatting
+  // TODO: Display current files and dirs by subtracting created - deleted
   int metrics_len = scnprintf(
       metrics_buf, sizeof(metrics_buf),
       "bytes written: %lld\n"
       "bytes read: %lld\n"
       "write operations: %lld\n"
       "read operations: %lld\n"
-      "files created: %lld\n",
+      "files created: %lld\n"
+      "files deleted: %lld\n"
+      "dirs created: %lld\n"
+      "dirs deleted: %lld\n",
       atomic64_read(&total_bytes_written), atomic64_read(&total_bytes_read),
       atomic64_read(&total_write_ops), atomic64_read(&total_read_ops),
-      atomic64_read(&total_files_created));
+      atomic64_read(&total_files_created), atomic64_read(&total_files_deleted),
+      atomic64_read(&total_dirs_created), atomic64_read(&total_dirs_deleted));
 
   // Copies the kernel space memory in metrics_buf correctly to the user space
   // memory in buf
