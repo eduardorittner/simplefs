@@ -23,9 +23,9 @@ MODULE_LICENSE("GPL");
 // Constants
 // ---------
 
-#define MYFS_BLOCKSIZE 4096
-#define MYFS_BLOCKSIZE_BITS 12
-#define MYFS_MAGIC 0xbeefcafe
+#define mfs_BLOCKSIZE 4096
+#define mfs_BLOCKSIZE_BITS 12
+#define mfs_MAGIC 0xbeefcafe
 #define LOG_LEVEL KERN_ALERT
 
 // ----------------
@@ -42,14 +42,14 @@ static atomic64_t total_files_created;
 // Forward declarations for regular files
 // --------------------------------------
 
-static int myfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
-                      struct dentry *dentry, umode_t mode, dev_t dev);
-static int myfs_create(struct mnt_idmap *idmap, struct inode *dir,
-                       struct dentry *dentry, umode_t mode, bool excl);
-static int myfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-                      struct dentry *dentry, umode_t mode);
-struct inode *myfs_get_inode(struct super_block *sb, const struct inode *dir,
-                             int mode);
+static int mfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+                     struct dentry *dentry, umode_t mode, dev_t dev);
+static int mfs_create(struct mnt_idmap *idmap, struct inode *dir,
+                      struct dentry *dentry, umode_t mode, bool excl);
+static int mfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+                     struct dentry *dentry, umode_t mode);
+struct inode *mfs_get_inode(struct super_block *sb, const struct inode *dir,
+                            int mode);
 
 // This needs to be declared here since it's not publicly exported by the
 // kernel. In the tutorial this wasn't a problem since the filesystem an in-tree
@@ -62,44 +62,44 @@ extern int simple_write_end(struct file *file, struct address_space *mapping,
 // Forward declarations for metric file
 // ------------------------------------
 
-static ssize_t myfs_metrics_read(struct file *file, char __user *buf,
+static ssize_t mfs_metrics_read(struct file *file, char __user *buf, size_t len,
+                                loff_t *offset);
+static ssize_t mfs_metrics_write(struct file *file, const char __user *buf,
                                  size_t len, loff_t *offset);
-static ssize_t myfs_metrics_write(struct file *file, const char __user *buf,
-                                  size_t len, loff_t *offset);
 
 // ----------
 // Operations
 // ----------
 
-static const struct super_operations myfs_ops = {
+static const struct super_operations mfs_ops = {
     .statfs = simple_statfs,
     .drop_inode = generic_drop_inode,
 };
 
-static const struct inode_operations myfs_dir_inode_operations = {
-    .create = myfs_create,
+static const struct inode_operations mfs_dir_inode_operations = {
+    .create = mfs_create,
     .lookup = simple_lookup,
     .link = simple_link,
     .unlink = simple_unlink,
-    .mkdir = myfs_mkdir,
+    .mkdir = mfs_mkdir,
     .rmdir = simple_rmdir,
-    .mknod = myfs_mknod,
+    .mknod = mfs_mknod,
     .rename = simple_rename,
 };
 
-static const struct file_operations myfs_file_operations = {
+static const struct file_operations mfs_file_operations = {
     .read_iter = generic_file_read_iter,
     .write_iter = generic_file_write_iter,
     .mmap = generic_file_mmap,
     .llseek = generic_file_llseek,
 };
 
-static const struct inode_operations myfs_file_inode_operations = {
+static const struct inode_operations mfs_file_inode_operations = {
     .getattr = simple_getattr,
 };
 
-static const struct file_operations myfs_metrics_operations = {
-    .read = myfs_metrics_read, .write = myfs_metrics_write,
+static const struct file_operations mfs_metrics_operations = {
+    .read = mfs_metrics_read, .write = mfs_metrics_write,
     // TODO do we need to add
     // .llseek = genereic_file_llseek
 };
@@ -108,8 +108,8 @@ static const struct file_operations myfs_metrics_operations = {
 // Operation implementations
 // -------------------------
 
-struct inode *myfs_get_inode(struct super_block *sb, const struct inode *dir,
-                             int mode) {
+struct inode *mfs_get_inode(struct super_block *sb, const struct inode *dir,
+                            int mode) {
   struct inode *inode = new_inode(sb);
 
   if (!inode)
@@ -127,24 +127,24 @@ struct inode *myfs_get_inode(struct super_block *sb, const struct inode *dir,
     inode->i_op = &simple_dir_inode_operations;
     inode->i_fop = &simple_dir_operations;
 
-    inode->i_op = &myfs_dir_inode_operations;
+    inode->i_op = &mfs_dir_inode_operations;
 
     inc_nlink(inode);
   }
 
   if (S_ISREG(mode)) {
-    inode->i_op = &myfs_file_inode_operations;
-    inode->i_fop = &myfs_file_operations;
+    inode->i_op = &mfs_file_inode_operations;
+    inode->i_fop = &mfs_file_operations;
   }
 
   return inode;
 }
 
-static int myfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
-                      struct dentry *dentry, umode_t mode, dev_t dev) {
+static int mfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+                     struct dentry *dentry, umode_t mode, dev_t dev) {
   printk(LOG_LEVEL "Creating node: %s\n", dentry->d_iname);
 
-  struct inode *inode = myfs_get_inode(dir->i_sb, dir, mode);
+  struct inode *inode = mfs_get_inode(dir->i_sb, dir, mode);
 
   if (inode == NULL)
     return -ENOSPC;
@@ -156,19 +156,19 @@ static int myfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
   return 0;
 }
 
-static int myfs_create(struct mnt_idmap *idmap, struct inode *dir,
-                       struct dentry *dentry, umode_t mode, bool excl) {
+static int mfs_create(struct mnt_idmap *idmap, struct inode *dir,
+                      struct dentry *dentry, umode_t mode, bool excl) {
   printk(LOG_LEVEL "Creating file: %s\n", dentry->d_iname);
 
-  return myfs_mknod(idmap, dir, dentry, mode | S_IFREG, 0);
+  return mfs_mknod(idmap, dir, dentry, mode | S_IFREG, 0);
 }
 
-static int myfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-                      struct dentry *dentry, umode_t mode) {
+static int mfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+                     struct dentry *dentry, umode_t mode) {
   printk(LOG_LEVEL "Creating dir: %s\n", dentry->d_iname);
   int ret;
 
-  ret = myfs_mknod(idmap, dir, dentry, mode | S_IFDIR, 0);
+  ret = mfs_mknod(idmap, dir, dentry, mode | S_IFDIR, 0);
   if (ret != 0)
     return ret;
 
@@ -182,8 +182,8 @@ static int myfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 // -------------------------
 
 // Custom read function which formats current metrics into a buffer
-static ssize_t myfs_metrics_read(struct file *file, char __user *buf,
-                                 size_t len, loff_t *offset) {
+static ssize_t mfs_metrics_read(struct file *file, char __user *buf, size_t len,
+                                loff_t *offset) {
   char metrics_buf[1024];
 
   int metrics_len = scnprintf(
@@ -203,8 +203,8 @@ static ssize_t myfs_metrics_read(struct file *file, char __user *buf,
 }
 
 // No-op write function which returns "Permission denied" on every write
-static ssize_t myfs_metrics_write(struct file *file, const char __user *buf,
-                                  size_t len, loff_t *offset) {
+static ssize_t mfs_metrics_write(struct file *file, const char __user *buf,
+                                 size_t len, loff_t *offset) {
   return -EACCES;
 }
 
@@ -212,7 +212,7 @@ static ssize_t myfs_metrics_write(struct file *file, const char __user *buf,
 // Filesystem routines
 // -------------------
 
-static int myfs_fill_super(struct super_block *sb, void *data, int silent) {
+static int mfs_fill_super(struct super_block *sb, void *data, int silent) {
   struct inode *root_inode;
   struct dentry *root_dentry;
   struct inode *metrics_inode;
@@ -220,13 +220,13 @@ static int myfs_fill_super(struct super_block *sb, void *data, int silent) {
 
   // Mfs properties
   sb->s_maxbytes = MAX_LFS_FILESIZE;
-  sb->s_blocksize = MYFS_BLOCKSIZE;
-  sb->s_blocksize_bits = MYFS_BLOCKSIZE_BITS;
-  sb->s_magic = MYFS_MAGIC;
-  sb->s_op = &myfs_ops;
+  sb->s_blocksize = mfs_BLOCKSIZE;
+  sb->s_blocksize_bits = mfs_BLOCKSIZE_BITS;
+  sb->s_magic = mfs_MAGIC;
+  sb->s_op = &mfs_ops;
 
   /* mode = directory & access rights (755) */
-  root_inode = myfs_get_inode(
+  root_inode = mfs_get_inode(
       sb, NULL, S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
 
   printk(LOG_LEVEL "root inode has %d link(s)\n", root_inode->i_nlink);
@@ -247,14 +247,14 @@ static int myfs_fill_super(struct super_block *sb, void *data, int silent) {
     goto out_root;
 
   // Allocate inode
-  metrics_inode = myfs_get_inode(sb, root_inode, S_IFREG | 0444);
+  metrics_inode = mfs_get_inode(sb, root_inode, S_IFREG | 0444);
   if (!metrics_inode) {
     dput(metrics_dentry);
     goto out_root;
   }
 
   // Set custom operations
-  metrics_inode->i_fop = &myfs_metrics_operations;
+  metrics_inode->i_fop = &mfs_metrics_operations;
   // Link dentry and inode
   d_add(metrics_dentry, metrics_inode);
 
@@ -270,46 +270,46 @@ out_root_inode:
   return -ENOMEM;
 }
 
-static struct dentry *myfs_mount(struct file_system_type *fs_type, int flags,
-                                 const char *dev_name, void *data) {
-  printk(LOG_LEVEL "Mounting myfs filesytem\n");
-  return mount_nodev(fs_type, flags, data, myfs_fill_super);
+static struct dentry *mfs_mount(struct file_system_type *fs_type, int flags,
+                                const char *dev_name, void *data) {
+  printk(LOG_LEVEL "Mounting mfs filesytem\n");
+  return mount_nodev(fs_type, flags, data, mfs_fill_super);
 }
 
 // We only define this function in order to log the umount operation, since
 // the actual work is being done by kill_litter_super
-static void myfs_umount(struct super_block *sb) {
-  printk(LOG_LEVEL "Unmount myfs filesystem\n");
+static void mfs_umount(struct super_block *sb) {
+  printk(LOG_LEVEL "Unmount mfs filesystem\n");
   kill_litter_super(sb);
 }
 
-static struct file_system_type myfs_fs_type = {
+static struct file_system_type mfs_fs_type = {
     .owner = THIS_MODULE,
-    .name = "myfs",
-    .mount = myfs_mount,
-    .kill_sb = myfs_umount,
+    .name = "mfs",
+    .mount = mfs_mount,
+    .kill_sb = mfs_umount,
 };
 
-static int __init myfs_init(void) {
+static int __init mfs_init(void) {
   int err;
 
-  printk(LOG_LEVEL "myfs: registering\n");
+  printk(LOG_LEVEL "mfs: registering\n");
 
-  err = register_filesystem(&myfs_fs_type);
+  err = register_filesystem(&mfs_fs_type);
   if (err) {
-    printk(LOG_LEVEL "myfs: register_filesystem failed\n");
+    printk(LOG_LEVEL "mfs: register_filesystem failed\n");
     return err;
   }
 
   return 0;
 }
 
-static void __exit myfs_exit(void) {
-  printk(LOG_LEVEL "myfs: unregistering filesystem\n");
+static void __exit mfs_exit(void) {
+  printk(LOG_LEVEL "mfs: unregistering filesystem\n");
 
-  unregister_filesystem(&myfs_fs_type);
+  unregister_filesystem(&mfs_fs_type);
 }
 
 // Register init and exit routines
-module_init(myfs_init);
-module_exit(myfs_exit);
+module_init(mfs_init);
+module_exit(mfs_exit);
