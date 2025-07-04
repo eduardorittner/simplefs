@@ -4,7 +4,7 @@ Simple in-memory filesystem with global stats.
 
 ## Running
 
-1. Compile the module along with a compatible (v6.8) kernel
+1. Compile the module with the v6.8.0 kernel
 2. `insmod mfs.ko`
 3. `mkdir /mnt/mfs`
 4. `mount -t mfs none /mnt/mfs`
